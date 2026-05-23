@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { demoChart, normalizeChart } from './chart';
+import { builtInTracks, demoChart, normalizeChart } from './chart';
 import {
   accuracy,
   activeInputsFromPose,
@@ -9,6 +9,7 @@ import {
   initialScore,
   inputColors,
   inputLabels,
+  judgeInput,
   judgeNote,
 } from './gameLogic';
 import type { Calibration, GamePhase, Judgment, MotionInput, PoseFrame, RhythmChart, ScoreState } from './types';
@@ -34,7 +35,8 @@ export default function App() {
   const [cameraError, setCameraError] = useState('');
   const [audioName, setAudioName] = useState('');
   const [chart, setChart] = useState<RhythmChart>(demoChart);
-  const [chartName, setChartName] = useState('내장 데모 차트');
+  const [chartName, setChartName] = useState('Pulse Training');
+  const [selectedTrackId, setSelectedTrackId] = useState(builtInTracks[0].id);
   const [score, setScore] = useState<ScoreState>(initialScore);
   const [pose, setPose] = useState<PoseFrame>({ tracking: false, source: 'none' });
   const [calibration, setCalibration] = useState<Calibration>(() => createDefaultCalibration(960, 620));
@@ -51,7 +53,12 @@ export default function App() {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const demoTimerRef = useRef<number | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const startTimeRef = useRef(0);
+  const songTimeRef = useRef(0);
   const lastFrameRef = useRef<ImageData | null>(null);
+  const previousActiveRef = useRef<Set<MotionInput>>(new Set());
   const toastIdRef = useRef(0);
 
   const activeInputs = useMemo(() => {
@@ -60,11 +67,31 @@ export default function App() {
     return active;
   }, [calibration, pose, pressed]);
 
+  const selectedTrack = useMemo(
+    () => builtInTracks.find((track) => track.id === selectedTrackId) || builtInTracks[0],
+    [selectedTrackId],
+  );
+
   const progress = useMemo(() => {
     const lastNote = chart.notes.at(-1);
-    const duration = audioRef.current?.duration && Number.isFinite(audioRef.current.duration) ? audioRef.current.duration : (lastNote?.time || 30) + 3;
+    const duration = audioRef.current?.duration && Number.isFinite(audioRef.current.duration)
+      ? audioRef.current.duration
+      : Math.max(selectedTrack.duration, (lastNote?.time || 30) + 3);
     return Math.min(100, Math.max(0, (songTime / duration) * 100));
-  }, [chart.notes, songTime]);
+  }, [chart.notes, selectedTrack.duration, songTime]);
+
+  const attachCameraStream = useCallback(async () => {
+    if (!videoRef.current || !streamRef.current) return;
+    if (videoRef.current.srcObject !== streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+    }
+    try {
+      await videoRef.current.play();
+      setCameraError('');
+    } catch (error) {
+      setCameraError(error instanceof Error ? error.message : '카메라 스트림을 video에 연결하지 못했습니다.');
+    }
+  }, []);
 
   const startCamera = useCallback(async () => {
     try {
@@ -73,16 +100,21 @@ export default function App() {
         video: { width: 1280, height: 720, facingMode: 'user' },
         audio: false,
       });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
+      streamRef.current = stream;
       setCameraReady(true);
+      await attachCameraStream();
       setPhase('calibration');
     } catch (error) {
+      setCameraReady(false);
       setCameraError(error instanceof Error ? error.message : '카메라 권한을 가져오지 못했습니다.');
     }
-  }, []);
+  }, [attachCameraStream]);
+
+  useEffect(() => {
+    if (cameraReady) {
+      void attachCameraStream();
+    }
+  }, [attachCameraStream, cameraReady, phase]);
 
   const resizeCalibration = useCallback(() => {
     const rect = stageRef.current?.getBoundingClientRect();
@@ -101,6 +133,9 @@ export default function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       const input = keys[event.key.toLowerCase()];
       if (!input) return;
+      if (!event.repeat) {
+        handleInput(input, 'keyboard');
+      }
       setPressed((current) => new Set(current).add(input));
     };
     const onKeyUp = (event: KeyboardEvent) => {
@@ -118,7 +153,7 @@ export default function App() {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, []);
+  }, [phase, judgedIds, chart, score]);
 
   useEffect(() => {
     let frameId = 0;
@@ -215,6 +250,7 @@ export default function App() {
     }
     setAudioName(file.name);
     setUseDemoBeat(false);
+    setSelectedTrackId('custom');
   }
 
   async function handleChartFile(file?: File) {
@@ -222,22 +258,51 @@ export default function App() {
     const text = await file.text();
     setChart(normalizeChart(JSON.parse(text)));
     setChartName(file.name);
+    setSelectedTrackId('custom');
+  }
+
+  function selectTrack(trackId: string) {
+    const track = builtInTracks.find((item) => item.id === trackId);
+    if (!track) return;
+    resetRun();
+    setSelectedTrackId(track.id);
+    setChart(track.chart);
+    setChartName(track.title);
+    setAudioName('');
+    setUseDemoBeat(true);
   }
 
   function resetRun() {
     setScore(initialScore);
     setJudgedIds(new Set());
     setSongTime(0);
+    songTimeRef.current = 0;
     setToast(null);
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
     }
     if (demoTimerRef.current) window.clearInterval(demoTimerRef.current);
+    if (audioContextRef.current) {
+      void audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+  }
+
+  function prepareAudioContext() {
+    if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+      audioContextRef.current = new AudioContext();
+    }
+    if (audioContextRef.current.state === 'suspended') {
+      void audioContextRef.current.resume();
+    }
   }
 
   function startCountdown() {
     resetRun();
+    if (useDemoBeat) {
+      prepareAudioContext();
+    }
     setCountdown(3);
     setPhase('countdown');
     let value = 3;
@@ -259,8 +324,12 @@ export default function App() {
     }
 
     const start = performance.now();
+    startTimeRef.current = start;
+    scheduleSynthTrack(chart);
     demoTimerRef.current = window.setInterval(() => {
-      setSongTime((performance.now() - start) / 1000);
+      const currentTime = (performance.now() - start) / 1000;
+      songTimeRef.current = currentTime;
+      setSongTime(currentTime);
     }, 16);
   }
 
@@ -274,7 +343,10 @@ export default function App() {
     const audio = audioRef.current;
     if (!audio) return;
 
-    const update = () => setSongTime(audio.currentTime);
+    const update = () => {
+      songTimeRef.current = audio.currentTime;
+      setSongTime(audio.currentTime);
+    };
     const end = () => finishGame();
     audio.addEventListener('timeupdate', update);
     audio.addEventListener('ended', end);
@@ -284,18 +356,74 @@ export default function App() {
     };
   }, []);
 
+  function handleInput(input: MotionInput, source: 'keyboard' | 'camera') {
+    if (phase !== 'playing') return;
+
+    const currentSongTime = !useDemoBeat && audioRef.current?.src ? audioRef.current.currentTime : songTimeRef.current;
+    songTimeRef.current = currentSongTime;
+    const inputTime = currentSongTime - chart.offset;
+    const candidate = chart.notes
+      .filter((note) => !judgedIds.has(note.id) && note.type === input)
+      .map((note) => ({ note, delta: Math.abs(note.time - inputTime) }))
+      .filter((item) => item.delta <= 0.24)
+      .sort((a, b) => a.delta - b.delta)[0];
+
+    if (!candidate) {
+      setToast({ id: toastIdRef.current++, judgment: 'Miss', input });
+      return;
+    }
+
+    const judgment = judgeInput(candidate.note, inputTime, input);
+    if (!judgment) return;
+
+    setJudgedIds((current) => new Set(current).add(candidate.note.id));
+    setScore((current) => applyJudgment(current, judgment));
+    setToast({ id: toastIdRef.current++, judgment, input });
+    if (source === 'camera') {
+      setPose((current) => ({ ...current, tracking: true }));
+    }
+  }
+
+  function scheduleSynthTrack(currentChart: RhythmChart) {
+    const context = audioContextRef.current && audioContextRef.current.state !== 'closed' ? audioContextRef.current : new AudioContext();
+    audioContextRef.current = context;
+    const master = context.createGain();
+    master.gain.value = 0.12;
+    master.connect(context.destination);
+
+    const startAt = context.currentTime + 0.08;
+    const frequencies: Record<MotionInput, number> = {
+      'left-up': 523.25,
+      'left-down': 392.0,
+      'right-up': 659.25,
+      'right-down': 493.88,
+    };
+
+    currentChart.notes.forEach((note, index) => {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = index % 4 === 0 ? 'sawtooth' : 'triangle';
+      oscillator.frequency.value = frequencies[note.type];
+      gain.gain.setValueAtTime(0.0001, startAt + note.time);
+      gain.gain.exponentialRampToValueAtTime(0.55, startAt + note.time + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startAt + note.time + 0.11);
+      oscillator.connect(gain);
+      gain.connect(master);
+      oscillator.start(startAt + note.time);
+      oscillator.stop(startAt + note.time + 0.12);
+    });
+  }
+
   useEffect(() => {
     if (phase !== 'playing') return;
-    const active = activeInputs;
     const nextJudged = new Set(judgedIds);
     let nextScore = score;
     let hitToast: Toast | null = null;
 
     chart.notes.forEach((note) => {
       if (nextJudged.has(note.id)) return;
-      if (songTime < note.time - 0.24) return;
-      const judgment = judgeNote(note, songTime - chart.offset, active);
-      if (!judgment) return;
+      if (songTime - chart.offset <= note.time + 0.24) return;
+      const judgment = judgeNote(note, songTime - chart.offset, new Set()) || 'Miss';
       nextJudged.add(note.id);
       nextScore = applyJudgment(nextScore, judgment);
       hitToast = { id: toastIdRef.current++, judgment, input: note.type };
@@ -311,10 +439,31 @@ export default function App() {
     if (lastNote && songTime > lastNote.time + 2.4) {
       finishGame();
     }
-  }, [activeInputs, chart, judgedIds, phase, score, songTime]);
+  }, [chart, judgedIds, phase, score, songTime]);
+
+  useEffect(() => {
+    if (phase !== 'playing') {
+      previousActiveRef.current = new Set(activeInputs);
+      return;
+    }
+
+    activeInputs.forEach((input) => {
+      if (!previousActiveRef.current.has(input) && !pressed.has(input)) {
+        handleInput(input, 'camera');
+      }
+    });
+    previousActiveRef.current = new Set(activeInputs);
+  }, [activeInputs, phase, pressed]);
 
   const visibleNotes = chart.notes.filter((note) => note.time > songTime - 0.5 && note.time < songTime + 2.7);
   const canStart = (cameraReady || keyboardTestMode) && (useDemoBeat || audioName);
+  const cameraStatus = cameraReady
+    ? streamRef.current?.active
+      ? '스트림 연결됨'
+      : '권한은 있으나 스트림 없음'
+    : cameraError
+      ? '카메라 오류'
+      : '대기 중';
 
   return (
     <main className="motion-pulse-shell">
@@ -346,12 +495,32 @@ export default function App() {
           />
 
           <aside className="mp-panel setup-panel">
-            <h2>플레이 준비</h2>
+            <h2>곡 선택</h2>
+            <div className="song-list">
+              {builtInTracks.map((track) => (
+                <button
+                  key={track.id}
+                  className={`song-card ${selectedTrackId === track.id ? 'selected' : ''}`}
+                  onClick={() => selectTrack(track.id)}
+                >
+                  <span>
+                    <strong>{track.title}</strong>
+                    <small>{track.artist}</small>
+                  </span>
+                  <em>Lv.{track.difficulty}</em>
+                </button>
+              ))}
+            </div>
             <div className="control-stack">
               <button className="primary-button" onClick={startCamera}>
                 카메라 시작
               </button>
               {cameraError && <p className="error-text">{cameraError}</p>}
+              <div className="camera-diagnostics">
+                <span>카메라</span>
+                <strong>{cameraStatus}</strong>
+                <small>권한 허용 후 화면이 비면 브라우저 주소창의 카메라 권한과 macOS 개인정보 보호 설정을 확인하세요.</small>
+              </div>
               <label className="file-button">
                 로컬 mp3 선택
                 <input type="file" accept="audio/*" onChange={(event) => handleAudioFile(event.target.files?.[0])} />
@@ -516,7 +685,7 @@ function CameraPanel({
       {visibleNotes.map((note) => {
         const laneIndex = inputOrder.indexOf(note.type);
         const secondsUntilHit = note.time - songTime;
-        const y = 72 + (2.7 - secondsUntilHit) * 180;
+        const y = 72 + (2.7 - secondsUntilHit) * 160;
         return (
           <div
             className="falling-note"
