@@ -82,6 +82,15 @@ export function judgeNote(note: ChartNote, songTime: number, activeInputs: Set<M
   return delta > 0.22 ? 'Miss' : null;
 }
 
+export function judgeInput(note: ChartNote, inputTime: number, input: MotionInput): Judgment | null {
+  if (note.type !== input) return null;
+  const delta = Math.abs(inputTime - note.time);
+  if (delta <= 0.08) return 'Perfect';
+  if (delta <= 0.15) return 'Great';
+  if (delta <= 0.24) return 'Good';
+  return null;
+}
+
 export function applyJudgment(score: ScoreState, judgment: Judgment): ScoreState {
   const hit = judgment !== 'Miss';
   const combo = hit ? score.combo + 1 : 0;

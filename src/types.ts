@@ -19,6 +19,16 @@ export type RhythmChart = {
   notes: ChartNote[];
 };
 
+export type BuiltInTrack = {
+  id: string;
+  title: string;
+  artist: string;
+  bpm: number;
+  difficulty: number;
+  duration: number;
+  chart: RhythmChart;
+};
+
 export type ScoreState = {
   score: number;
   combo: number;

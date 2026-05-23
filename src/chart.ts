@@ -1,4 +1,4 @@
-import type { MotionInput, RhythmChart } from './types';
+import type { BuiltInTrack, MotionInput, RhythmChart } from './types';
 
 const pattern: MotionInput[] = [
   'left-up',
@@ -11,17 +11,51 @@ const pattern: MotionInput[] = [
   'left-down',
 ];
 
-export const demoChart: RhythmChart = {
-  title: 'Pulse Training',
-  artist: 'Motion Pulse',
-  bpm: 124,
-  offset: 0,
-  notes: Array.from({ length: 84 }, (_, index) => ({
-    id: `demo-${index}`,
-    time: 2 + index * 0.48 + (index > 32 ? Math.floor((index - 32) / 8) * 0.08 : 0),
-    type: pattern[index % pattern.length],
-  })),
-};
+function makeChart(title: string, artist: string, bpm: number, length: number, interval: number, shift = 0): RhythmChart {
+  return {
+    title,
+    artist,
+    bpm,
+    offset: 0,
+    notes: Array.from({ length }, (_, index) => ({
+      id: `${title.toLowerCase().replaceAll(' ', '-')}-${index}`,
+      time: 2 + index * interval,
+      type: pattern[(index + shift + Math.floor(index / 8)) % pattern.length],
+    })),
+  };
+}
+
+export const builtInTracks: BuiltInTrack[] = [
+  {
+    id: 'pulse-training',
+    title: 'Pulse Training',
+    artist: 'Motion Pulse',
+    bpm: 124,
+    difficulty: 3,
+    duration: 42,
+    chart: makeChart('Pulse Training', 'Motion Pulse', 124, 84, 0.48, 0),
+  },
+  {
+    id: 'seoul-neon',
+    title: 'Seoul Neon',
+    artist: 'Local Synth',
+    bpm: 138,
+    difficulty: 5,
+    duration: 38,
+    chart: makeChart('Seoul Neon', 'Local Synth', 138, 96, 0.38, 2),
+  },
+  {
+    id: 'Arcade Sprint',
+    title: 'Arcade Sprint',
+    artist: 'Motion Pulse',
+    bpm: 152,
+    difficulty: 7,
+    duration: 34,
+    chart: makeChart('Arcade Sprint', 'Motion Pulse', 152, 110, 0.3, 4),
+  },
+];
+
+export const demoChart: RhythmChart = builtInTracks[0].chart;
 
 export function normalizeChart(raw: unknown): RhythmChart {
   if (!raw || typeof raw !== 'object') {
